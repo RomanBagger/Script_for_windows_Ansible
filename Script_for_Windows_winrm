@@ -1,0 +1,53 @@
+# Enable PowerShell Remoting
+Enable-PSRemoting -Force
+
+# Set WinRM service startup type to automatic
+Set-Service WinRM -StartupType 'Automatic'
+
+# Configure WinRM Service for Certificate Authentication and other methods
+Set-Item -Path WSMan:\localhost\Service\Auth\Certificate -Value $true
+Set-Item -Path 'WSMan:\localhost\Service\AllowUnencrypted' -Value $true
+Set-Item -Path 'WSMan:\localhost\Service\Auth\Basic' -Value $true
+Set-Item -Path 'WSMan:\localhost\Service\Auth\CredSSP' -Value $true
+
+# Attempt to get the public hostname from AWS metadata service
+try {
+    $hostname = Invoke-RestMethod -Uri http://169.254.169.254/latest/meta-data/public-hostname
+} catch {
+    Write-Warning "Could not retrieve hostname from metadata service. Using local hostname instead."
+    # Use local hostname as fallback
+    $hostname = $env:COMPUTERNAME
+}
+
+# Check if hostname is empty and use a fallback
+if (-not $hostname) {
+    $hostname = "localhost"
+}
+
+# Create a self-signed certificate with the hostname
+$cert = New-SelfSignedCertificate -DnsName $hostname -CertStoreLocation "cert:\LocalMachine\My"
+
+# Set up HTTPS listener using the self-signed certificate
+$listenerConfig = @{
+    Hostname = $hostname
+    CertificateThumbprint = $cert.Thumbprint
+}
+winrm create winrm/config/Listener?Address=*+Transport=HTTPS "@{Hostname=`"$($listenerConfig.Hostname)`";CertificateThumbprint=`"$($listenerConfig.CertificateThumbprint)`"}"
+
+# Create a firewall rule to allow WinRM HTTPS inbound
+New-NetFirewallRule -DisplayName "Allow WinRM HTTPS" -Direction Inbound -LocalPort 5986 -Protocol TCP -Action Allow
+
+# Configure TrustedHosts to allow connections from any host
+Set-Item WSMan:\localhost\Client\TrustedHosts -Value "*" -Force
+
+# Set LocalAccountTokenFilterPolicy to enable connections with local accounts
+New-ItemProperty -Name LocalAccountTokenFilterPolicy -Path HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System -PropertyType DWord -Value 1 -Force
+
+# Set Execution Policy to Unrestricted to allow the execution of scripts
+Set-ExecutionPolicy Unrestricted -Force
+
+# Restart the WinRM service to apply changes
+Restart-Service WinRM
+
+# List the configured WinRM listeners to verify the setup
+winrm enumerate winrm/config/Listener
